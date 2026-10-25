@@ -21,6 +21,7 @@ files=(
     gmn_banksia_archive_station.sbatch
     gmn_banksia_restore_submit.sh
     gmn_banksia_restore_station.sbatch
+    gmn_banksia_submit_next.sbatch
     README.md
 )
 

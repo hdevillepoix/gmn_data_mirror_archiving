@@ -143,11 +143,11 @@ do
     printf '%s\t%s\n' "${year} ${st}" "${logf}" >> "${watchFile}"
 done < "${listFile}"
 
-GMN_JOB_IDS=()
+GMN_JOB_NAMES=()
 gmnSubmitArrays "${jobName}" "${GMN_HOME}/gmn_banksia_restore_station.sbatch" \
     "${SLURM_WALLTIME_RESTORE}" "${year}" "${listFile}" "${dest}" "${tarOnly}"
 rc=$?
-if [ ${#GMN_JOB_IDS[@]} -gt 0 ]
+if [ ${#GMN_JOB_NAMES[@]} -gt 0 ]
 then
     if [ "${watch}" = "TRUE" ]
     then

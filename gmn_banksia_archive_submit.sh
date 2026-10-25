@@ -120,7 +120,7 @@ planYear() {
     done < "${outDir}/stations.tsv"
 }
 
-GMN_JOB_IDS=()
+GMN_JOB_NAMES=()
 watchFile="${STATE_DIR}/lists/archive_watch_$(date +%Y%m%d_%H%M%S).tsv"
 : > "${watchFile}"
 
@@ -188,7 +188,7 @@ do
 	"${SLURM_WALLTIME_ARCHIVE}" "${year}" "${listFile}" || rc=1
 done
 
-if [ "${dryRun}" = "FALSE" ] && [ ${#GMN_JOB_IDS[@]} -gt 0 ]
+if [ "${dryRun}" = "FALSE" ] && [ ${#GMN_JOB_NAMES[@]} -gt 0 ]
 then
     if [ "${watch}" = "TRUE" ]
     then

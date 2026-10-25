@@ -244,45 +244,79 @@ gmnHuman() {
 
 #----------------------------------------------------
 ### gmnSubmitArrays(): submits one SLURM array task per line of a work list,
-### at most MAX_PARALLEL running. Lists longer than SLURM_ARRAY_MAX are cut
-### into several arrays chained with afterany, so the limit holds overall.
+### at most MAX_PARALLEL running. Every array task counts against the
+### account's MaxSubmitJobs, so only one batch is queued at a time: if the
+### list doesn't fit, a small continuation job (same job name,
+### gmn_banksia_submit_next.sbatch) waits on the batch with afterany and
+### submits the next one. The whole chain is visible/cancellable by name.
 ### Each task gets: <year> <batch list file> <extra args...>.
-### Appends the submitted job ids to the global GMN_JOB_IDS array (so don't
-### call this in a pipeline/subshell).
+### Appends the job name to the global GMN_JOB_NAMES array once something
+### is queued (so don't call this in a pipeline/subshell).
 # params: $1 job name, $2 sbatch script, $3 walltime, $4 year, $5 list file,
 #         $6... extra args for the sbatch script
 #----------------------------------------------------
 gmnSubmitArrays() {
-    local jobName=${1}
-    local sbatchScript=${2}
-    local walltime=${3}
-    local year=${4}
-    local listFile=${5}
-    shift 5
-    local nLines batchFile batchN dependency="" jobId start=1 batchIdx=1
+    gmnSubmitBatch 1 1 "$@"
+}
+
+#----------------------------------------------------
+### gmnSubmitBatch(): submits the batch of the work list starting at line $1
+### (and the continuation job for the rest). Batch size is the room left
+### under SLURM_SUBMIT_MAX given this user's jobs already queued, minus one
+### for the continuation job, capped at SLURM_ARRAY_MAX.
+# params: $1 first line, $2 batch index, then as gmnSubmitArrays()
+#----------------------------------------------------
+gmnSubmitBatch() {
+    local start=${1}
+    local batchIdx=${2}
+    local jobName=${3}
+    local sbatchScript=${4}
+    local walltime=${5}
+    local year=${6}
+    local listFile=${7}
+    shift 7
+    local nLines nQueued room batchFile batchN jobId nextId next
     nLines=$(wc -l < "${listFile}")
-    while [ ${start} -le ${nLines} ]
-    do
-	batchFile="${listFile%.tsv}.batch${batchIdx}.tsv"
-	tail -n +"${start}" "${listFile}" | head -n "${SLURM_ARRAY_MAX}" > "${batchFile}"
-	batchN=$(wc -l < "${batchFile}")
-	jobId=$(sbatch --parsable \
-	    --job-name="${jobName}" \
-	    --partition="${SLURM_PARTITION}" \
-	    --account="${SLURM_ACCOUNT}" \
-	    --time="${walltime}" \
-	    --ntasks=1 --cpus-per-task="${RCLONE_CPUS}" --mem="${SLURM_MEM}" \
-	    --array="1-${batchN}%${MAX_PARALLEL}" \
-	    --output="${STATE_DIR}/logs/%x_%A_%a.out" \
-	    --export="ALL,GMN_HOME=${GMN_HOME},GMN_CONF=${GMN_CONF}" \
-	    ${dependency} \
-	    "${sbatchScript}" "${year}" "${batchFile}" "$@") || { gmnLog "ERROR: sbatch failed for ${batchFile}"; return 1; }
-	gmnLog "Submitted ${jobName} array job ${jobId} (${batchN} tasks, list ${batchFile})"
-	GMN_JOB_IDS+=("${jobId}")
-	dependency="--dependency=afterany:${jobId}"
-	start=$(( start + SLURM_ARRAY_MAX ))
-	batchIdx=$(( batchIdx + 1 ))
-    done
+    nQueued=$(squeue -h -r -u "${USER}" -o %i 2>/dev/null | wc -l)
+    room=$(( SLURM_SUBMIT_MAX - nQueued - 1 ))
+    [ ${room} -gt "${SLURM_ARRAY_MAX}" ] && room=${SLURM_ARRAY_MAX}
+    if [ ${room} -lt 1 ]
+    then
+	gmnLog "ERROR: no room to submit ${jobName} (${nQueued} jobs queued, SLURM_SUBMIT_MAX=${SLURM_SUBMIT_MAX}) - lines ${start}-${nLines} of ${listFile} not submitted, rerun the submitter later"
+	return 1
+    fi
+
+    batchFile="${listFile%.tsv}.batch${batchIdx}.tsv"
+    tail -n +"${start}" "${listFile}" | head -n "${room}" > "${batchFile}"
+    batchN=$(wc -l < "${batchFile}")
+    jobId=$(sbatch --parsable \
+	--job-name="${jobName}" \
+	--partition="${SLURM_PARTITION}" \
+	--account="${SLURM_ACCOUNT}" \
+	--time="${walltime}" \
+	--ntasks=1 --cpus-per-task="${RCLONE_CPUS}" --mem="${SLURM_MEM}" \
+	--array="1-${batchN}%${MAX_PARALLEL}" \
+	--output="${STATE_DIR}/logs/%x_%A_%a.out" \
+	--export="ALL,GMN_HOME=${GMN_HOME},GMN_CONF=${GMN_CONF}" \
+	"${sbatchScript}" "${year}" "${batchFile}" "$@") || { gmnLog "ERROR: sbatch failed for ${batchFile}"; return 1; }
+    gmnLog "Submitted ${jobName} array job ${jobId} (${batchN} tasks, list ${batchFile})"
+    GMN_JOB_NAMES+=("${jobName}")
+
+    next=$(( start + batchN ))
+    [ ${next} -gt ${nLines} ] && return 0
+    nextId=$(sbatch --parsable \
+	--job-name="${jobName}" \
+	--partition="${SLURM_PARTITION}" \
+	--account="${SLURM_ACCOUNT}" \
+	--time=00:15:00 \
+	--ntasks=1 --cpus-per-task=1 --mem=1G \
+	--dependency="afterany:${jobId}" \
+	--output="${STATE_DIR}/logs/%x_next_%j.out" \
+	--export="ALL,GMN_HOME=${GMN_HOME},GMN_CONF=${GMN_CONF},GMN_LOG=${GMN_LOG:-}" \
+	"${GMN_HOME}/gmn_banksia_submit_next.sbatch" \
+	"${next}" $(( batchIdx + 1 )) "${jobName}" "${sbatchScript}" "${walltime}" "${year}" "${listFile}" "$@") \
+	|| { gmnLog "ERROR: continuation sbatch failed - lines ${next}-${nLines} of ${listFile} not submitted, rerun the submitter once ${jobId} finishes"; return 1; }
+    gmnLog "Submitted ${jobName} continuation job ${nextId} (lines ${next}-${nLines}, after ${jobId})"
 }
 
 #----------------------------------------------------
@@ -306,7 +340,7 @@ gmnRotateLog() {
 }
 
 #----------------------------------------------------
-### gmnWatch(): foreground progress monitor for the jobs in GMN_JOB_IDS,
+### gmnWatch(): foreground progress monitor for the jobs in GMN_JOB_NAMES,
 ### meant to be left running in tmux. A station's state comes from its log:
 ### no log = queued, last timestamped (gmnLog) line "DONE: ..." / "FAILED: ..."
 ### = finished, anything else = running in that phase. A station still not
@@ -319,18 +353,18 @@ gmnRotateLog() {
 #----------------------------------------------------
 gmnWatch() {
     local watchFile=${1}
-    local jobList label logf state phase live err stats now
+    local jobNames label logf state phase live err stats now
     local nTotal nDone nFail nRun nQueue changed lastBeat
     local -A seenState=() seenPhase=()
     local failed=() running=()
-    jobList=$(IFS=,; echo "${GMN_JOB_IDS[*]}")
+    jobNames=$(IFS=,; echo "${GMN_JOB_NAMES[*]}")
     nTotal=$(wc -l < "${watchFile}")
     lastBeat=$(date +%s)
-    gmnLog "Watching ${nTotal} stations (jobs ${jobList}), polling every ${WATCH_INTERVAL}s."
-    gmnLog "Ctrl-C only stops watching - the jobs keep running (scancel ${jobList//,/ } to stop them)."
+    gmnLog "Watching ${nTotal} stations (jobs ${jobNames}), polling every ${WATCH_INTERVAL}s."
+    gmnLog "Ctrl-C only stops watching - the jobs keep running (scancel -n ${jobNames} to stop them)."
     while true
     do
-	live=$(squeue -h -j "${jobList}" -o %i 2>/dev/null | wc -l)
+	live=$(squeue -h -u "${USER}" -n "${jobNames}" -o %i 2>/dev/null | wc -l)
 	nDone=0; nFail=0; nRun=0; nQueue=0; changed=FALSE
 	failed=(); running=()
 	while IFS=$'\t' read -r label logf
@@ -366,7 +400,8 @@ gmnWatch() {
 			;;
 		    DIED)
 			gmnLog "  XX ${label}: job ended without DONE/FAILED (walltime, OOM or scancel?)"
-			gmnLog "     log: ${logf} (and the matching %x_%A_%a.out next to it)"
+			gmnLog "     log: ${logf} (and the matching %x_%A_%a.out next to it,"
+			gmnLog "     or the submit log if a continuation job failed to submit)"
 			;;
 		esac
 		seenState[${label}]=${state}

@@ -5,6 +5,7 @@ Scripts that copy the GMN nightly archives from Acacia (S3, `hdevillepoix:gmn-ar
 ## How it works
 - **One tar per year-station**, whatever its size. For example, `/projects/DFN/GMN/2018/gmn-archives-2018_us0001.tar` holds `us0001/` with its nightly `.tar.bz2` files. The tar is uncompressed and comes with a `.sha256` sidecar.
 - **One Slurm array task per station**, on the `copy` partition, with at most `MAX_PARALLEL` running at once. Each task holds one station on scratch: about 1× its size when archiving and 2× when restoring. Submitters estimate the peak and refuse to run if it is above `SCRATCH_BUDGET_BYTES` (2 TiB).
+- **Big years are queued in batches.** Every array task counts against Slurm's per-user `MaxSubmitJobs`, so only one batch is queued at a time. Each batch fits under `SLURM_SUBMIT_MAX` along with your other queued jobs. A small continuation job with the same name runs after the batch (`afterany`) and submits the next batch.
 - **State lives in `STATE_DIR`**, which is persistent and not on scratch:
   - `archive_done.tsv`: `year station tar_bytes sha256 nfiles date job`
   - `restore_done.tsv`: `year station dest tar_only date job`
